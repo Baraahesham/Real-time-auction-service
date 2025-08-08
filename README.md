@@ -41,7 +41,7 @@ A real-time auction service built with Go, featuring WebSocket support, bidding 
 
 In a system like this, strong consistency is critical, especially when dealing with financial transactions such as bidding. To ensure data integrity and support ACID properties (Atomicity, Consistency, Isolation, Durability), a relational SQL database is the most suitable choice. It provides transactional guarantees, making it a reliable backbone for operations like bid creation, auction state transitions, and user balances.
 
-### 3. Scalability – Real-Time Auction Updates
+### 2. Scalability – Real-Time Auction Updates
 
 Since the auction service is expected to run in multiple instances and integrate with other services (e.g., Payments, Orders), we cannot rely on in-memory state for auction updates. Instead, we use Redis Pub/Sub to propagate real-time events.
 - Each auction will have its own Redis channel.
@@ -111,7 +111,7 @@ sequenceDiagram
     end
 ```
 
-### 2. Bid Consistency – Handling Concurrent Updates
+### 3. Bid Consistency – Handling Concurrent Updates
 
 To ensure consistency during bid creation, we will use Optimistic Concurrency Control (OCC).
 This means:
@@ -120,6 +120,18 @@ This means:
 - If another bid was placed in the meantime (i.e., the price changed), the update is aborted or retried.
 
 This avoids race conditions and ensures we don't overwrite a more recent bid.
+
+```go
+// Bid placement with OCC
+func (r *BidRepository) PlaceBidWithOCC(ctx context.Context, newBid *bid.Bid, expectedCurrentPrice float64) error {
+    return r.conn.ExecuteTransaction(func(tx *sql.Tx) error {
+        // 1. Read current auction state
+        // 2. Validate expected vs actual price
+        // 3. Update only if price hasn't changed
+        // 4. Fail if concurrent modification detected
+    })
+}
+```
 
 
 ### Bid Placement Flow
@@ -327,75 +339,6 @@ CREATE INDEX idx_bids_auction_created ON bids(auction_id, created_at DESC);
 CREATE INDEX idx_bids_user_created ON bids(user_id, created_at DESC);
 ```
 
-## Scalability & Performance
-
-### Horizontal Scaling Strategy
-
-The system is designed for horizontal scaling with multiple service instances:
-
-
-#### **Load Balancing**
-- WebSocket connections can be load balanced using sticky sessions
-- Database connections use connection pooling
-- Redis connections are pooled per instance
-
-### Performance Optimizations
-
-#### **Worker Pool Pattern**
-```go
-// WebSocket message processing with worker pools
-pool := pond.New(
-    config.WSMaxWorkers,    // 10 workers
-    config.WSMaxCapacity,   // 100 capacity
-    pond.Strategy(pond.Balanced()),
-)
-```
-
-#### **Buffered Channels**
-```go
-// Event channels with buffering for burst handling
-eventChan := make(chan outbound.Event, 100)
-sendChan := make(chan *ServerMessage, 100)
-```
-
-#### **Database Optimizations**
-- **Connection Pooling**: Efficient database connection management
-- **Prepared Statements**: Reusable query plans
-- **Optimistic Concurrency Control**: Reduced locking overhead
-- **Partial Indexes**: Smaller, faster indexes
-
-## Consistency Model
-
-### Strong Consistency for Bids
-
-The system prioritizes **strong consistency** over availability for bid operations:
-
-#### **Optimistic Concurrency Control (OCC)**
-```go
-// Bid placement with OCC
-func (r *BidRepository) PlaceBidWithOCC(ctx context.Context, newBid *bid.Bid, expectedCurrentPrice float64) error {
-    return r.conn.ExecuteTransaction(func(tx *sql.Tx) error {
-        // 1. Read current auction state
-        // 2. Validate expected vs actual price
-        // 3. Update only if price hasn't changed
-        // 4. Fail if concurrent modification detected
-    })
-}
-```
-
-#### **ACID Properties**
-- **Atomicity**: Bid placement and auction update in single transaction
-- **Consistency**: Database constraints ensure data integrity
-- **Isolation**: OCC prevents race conditions
-- **Durability**: PostgreSQL WAL ensures data persistence
-
-### Eventual Consistency for Events
-
-Real-time events use **eventual consistency**:
-- Events may be delivered out of order
-- Temporary network issues don't block bid placement
-- System continues operating during Redis failures
-
 ## Deployment
 
 ### Docker Compose Setup
@@ -487,3 +430,32 @@ go run cmd/auction-service/main.go
   "timestamp": 1234567890
 }
 ```
+
+## Future Enhancements
+
+### 1. Testing Infrastructure
+
+The current implementation focuses on core functionality. Future enhancements should include comprehensive testing:
+
+- **Unit Tests**: Add unit tests for all domain logic, application services, and adapters
+- **Integration Tests**: Test the complete flow from WebSocket to database operations
+- **Performance Tests**: Load testing for WebSocket connections and bid placement
+- **End-to-End Tests**: Full auction lifecycle testing with multiple concurrent users
+
+### 2. Distributed Locking for Auction Scheduler
+
+The current auction scheduler processes expired auctions without coordination between multiple service instances. This can lead to race conditions where multiple instances try to end the same auction simultaneously.
+
+**Problem**: When multiple service instances run the scheduler, they might:
+- Both detect the same expired auction
+- Both attempt to end it simultaneously
+- Cause database conflicts or duplicate processing
+
+**Solution**: Implement distributed locking using Redis:
+- Use Redis `SET key value NX EX seconds` for atomic lock acquisition
+- Each instance attempts to acquire a lock before processing an auction
+- Lock key format: `auction:end:{auction_id}`
+- Lock duration: 30 seconds (enough time to process auction end)
+- If lock acquisition fails, skip that auction (another instance is handling it)
+
+This ensures only one instance processes each auction end, preventing race conditions and improving system reliability.
