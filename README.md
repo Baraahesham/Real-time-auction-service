@@ -409,12 +409,37 @@ go run cmd/auction-service/main.go
 
 ### WebSocket Messages
 
-#### **Client Messages**
+**Create Auction**
+```json
+{
+    "type": "create_auction",
+    "data": {
+        "item_id": "660e8400-e29b-41d4-a716-446655440001",
+        "start_time": "2025-08-08T04:02:00Z",
+        "end_time": "2025-08-08T04:05:00Z",
+        "starting_price": 500.00
+    }
+}
+```
+
+**Subscribe to Auction**
 ```json
 {
   "type": "subscribe",
-  "auction_id": "uuid",
-  "timestamp": 1234567890
+  "auction_id": "98869283-f6b3-49ac-9c7c-51ea0c3bd06f",
+  "timestamp": 1736323380
+}
+```
+
+**Place Bid**
+```json
+{
+  "type": "place_bid",
+  "auction_id": "98869283-f6b3-49ac-9c7c-51ea0c3bd06f",
+  "data": {
+    "amount": 601.00
+  },
+  "timestamp": 1736323260
 }
 ```
 
