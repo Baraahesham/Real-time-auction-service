@@ -1,0 +1,45 @@
+# Design and documentation files
+Design.txt
+Trofee Task Cursor.txt
+
+# Testing and development files
+postman_collection.json
+test_websocket_messages.json
+websocket_messages.txt
+
+# Environment files
+.envrc
+.env
+
+# Go specific
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+tmp/
+temp/ 
