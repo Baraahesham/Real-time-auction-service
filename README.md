@@ -1,4 +1,4 @@
-# Troffee Auction Service - System Design Document
+# Real-time-auction-service
 
 A real-time auction service built with Go, featuring WebSocket support, bidding functionality, and real-time updates. This document provides a comprehensive overview of the system architecture, technology choices, and implementation details.
 
