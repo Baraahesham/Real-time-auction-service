@@ -17,22 +17,66 @@ A real-time auction service built with Go, featuring WebSocket support, bidding 
 
 ### Functional Requirements
 
-- **Auction Management**: Users can create auctions for specific items
-- **Real-time Bidding**: Users can bid on active auctions with real-time updates
-- **Subscription System**: Users can subscribe to multiple auctions simultaneously
-- **Time-based Rules**: Bids are only accepted during auction active periods
-- **Bid Validation**: Bids must exceed the current highest bid amount
-- **Real-time Broadcasting**: All successful bids are broadcasted to subscribed users
-- **Item Uniqueness**: Only one active auction per item at any time
-- **Automatic Expiration**: Auctions automatically end at their scheduled time
+- Users can create auctions for specific items
+- Users can bid on active auctions with real-time updates
+- Users can subscribe to multiple auctions simultaneously
+- Bids are only accepted during auction active periods
+- Bids must exceed the current highest bid amount
+- All successful bids are broadcasted to subscribed users
+- Only one active auction per item at any time
+- Auctions automatically end at their scheduled time
 
 ### Non-Functional Requirements
 
-- **Strong Consistency**: Bid placement operations prioritize consistency over availability
-- **Scalability**: System supports multiple service instances
-- **Real-time Performance**: Sub-second latency for WebSocket communications
-- **Fault Tolerance**: System continues operating even if some components fail
-- **High Availability**: 99.9% uptime target
+- Bid placement operations prioritize Strong consistency over availability
+- System supports multiple service instances
+- Service should be scalable
+
+### Out of Scope
+
+- User authentication is assumed to be handled externally, and all incoming requests are considered to be from authenticated users.
+## Implementation Details
+
+### 1. Database Choice – Strong Consistency and ACID Guarantees
+
+In a system like this, strong consistency is critical, especially when dealing with financial transactions such as bidding. To ensure data integrity and support ACID properties (Atomicity, Consistency, Isolation, Durability), a relational SQL database is the most suitable choice. It provides transactional guarantees, making it a reliable backbone for operations like bid creation, auction state transitions, and user balances.
+
+### 2. Bid Consistency – Handling Concurrent Updates
+
+To ensure consistency during bid creation, we will use Optimistic Concurrency Control (OCC).
+This means:
+- When a user places a new bid, the service will read the current highest bid from the database.
+- Before writing the new bid, it checks whether the current highest bid is still the same.
+- If another bid was placed in the meantime (i.e., the price changed), the update is aborted or retried.
+
+This avoids race conditions and ensures we don't overwrite a more recent bid.
+
+### 3. Scalability – Real-Time Auction Updates
+
+Since the auction service is expected to run in multiple instances and integrate with other services (e.g., Payments, Orders), we cannot rely on in-memory state for auction updates. Instead, we use Redis Pub/Sub to propagate real-time events.
+- Each auction will have its own Redis channel.
+- Interested consumers (e.g., WebSocket gateways or notification services) can subscribe to relevant channels.
+
+This ensures horizontal scalability and decouples message broadcasting from a single service instance.
+
+### 4. Handling Auction Expiry – Scheduling Auction End
+
+Auctions must be marked as non-active once they reach their end time.
+Two approaches were considered:
+- A cron job that periodically queries the database for ended auctions and updates their status. This is will work in this case but not scalable — it causes frequent DB hits.
+- Instead, since Redis is already in use, we can leverage Redis Sorted Sets as a lightweight scheduler:
+  - Each auction is added to a sorted set with its end timestamp as the score.
+  - A background process periodically polls for expired auctions using a time range query.
+  - This avoids querying the database repeatedly and enables efficient expiry handling at scale.
+
+### 5. WebSocket Performance – Fast Message Handling
+
+To efficiently handle high-throughput WebSocket messages, especially during active auctions, we will use a Worker Pool Pattern.
+- Incoming messages are pushed to a buffered queue.
+- A pool of workers processes them concurrently.
+
+This model improves throughput, avoids blocking, and ensures low-latency communication with connected clients.
+
 
 ## Architecture
 
@@ -44,10 +88,10 @@ The system follows **Hexagonal Architecture** principles, providing clear separa
 ┌─────────────────────────────────────────────────────────────┐
 │                        Application Layer                     │
 ├─────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐          │
-│  │   Auction   │  │     Bid     │  │   User      │          │
-│  │   Service   │  │   Service   │  │   Service   │          │
-│  └─────────────┘  └─────────────┘  └─────────────┘          │
+│  ┌─────────────┐  ┌─────────────┐                           │
+│  │   Auction   │  │     Bid     │                           │
+│  │   Service   │  │   Service   │                           │
+│  └─────────────┘  └─────────────┘                           │
 ├─────────────────────────────────────────────────────────────┤
 │                        Domain Layer                         │
 ├─────────────────────────────────────────────────────────────┤
@@ -97,37 +141,6 @@ The system follows **Hexagonal Architecture** principles, providing clear separa
 └── scripts/              # Database scripts and utilities
 ```
 
-## Technology Stack
-
-### Core Technologies
-
-| Technology | Version | Purpose | Rationale |
-|------------|---------|---------|-----------|
-| **Go** | 1.21+ | Programming Language | High performance, excellent concurrency support, strong type system |
-| **PostgreSQL** | 14+ | Primary Database | ACID compliance, strong consistency, excellent for transactional data |
-| **Redis** | 7+ | Caching & Pub/Sub | Fast in-memory operations, built-in pub/sub, sorted sets for scheduling |
-| **Gorilla WebSocket** | Latest | WebSocket Library | Mature, well-tested, excellent performance |
-| **Viper** | Latest | Configuration | Flexible configuration management with multiple sources |
-
-### Why These Technologies?
-
-#### **Go (Golang)**
-- **Concurrency**: Native goroutines and channels for handling thousands of concurrent WebSocket connections
-- **Performance**: Near-C performance with garbage collection
-- **Simplicity**: Clean syntax and strong standard library
-- **WebSocket Support**: Excellent WebSocket libraries and HTTP/2 support
-
-#### **PostgreSQL**
-- **ACID Compliance**: Essential for bid placement where strong consistency is required
-- **Optimistic Concurrency Control**: Built-in support for OCC patterns
-- **JSON Support**: Native JSONB for flexible data storage
-- **Performance**: Excellent query optimizer and indexing capabilities
-
-#### **Redis**
-- **Pub/Sub**: Native support for real-time event broadcasting
-- **Sorted Sets**: Perfect for auction scheduling with end times
-- **Performance**: Sub-millisecond latency for real-time operations
-- **Scalability**: Horizontal scaling with Redis Cluster
 
 ## Data Flow
 
@@ -392,38 +405,12 @@ Real-time events use **eventual consistency**:
 
 ### Docker Compose Setup
 
-```yaml
-version: '3.8'
-services:
-  postgres:
-    image: postgres:14
-    environment:
-      POSTGRES_DB: auction_service
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
+The project includes a `docker-compose.yml` file that sets up PostgreSQL and Redis services for development. The file configures:
 
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
+- **PostgreSQL**: Database service with persistent volume
+- **Redis**: In-memory data store for caching and pub/sub
 
-  auction-service:
-    build: .
-    ports:
-      - "8080:8080"
-    environment:
-      - DB_URL=postgres://postgres:password@postgres:5432/auction_service
-      - REDIS_ADDR=redis:6379
-    depends_on:
-      - postgres
-      - redis
-```
+To use it, run: `docker compose up -d postgres redis`
 
 ### Environment Variables
 
@@ -451,23 +438,7 @@ WS_MAX_WORKERS=10
 WS_MAX_CAPACITY=100
 ```
 
-### Monitoring & Observability
 
-#### **Health Checks**
-- `/health` endpoint for load balancer health checks
-- Database connection monitoring
-- Redis connection monitoring
-
-#### **Logging**
-- Structured JSON logging with zerolog
-- Request tracing with correlation IDs
-- Performance metrics for key operations
-
-#### **Metrics**
-- WebSocket connection count
-- Bid placement latency
-- Auction creation rate
-- Event broadcasting throughput
 
 ## Getting Started
 
@@ -488,18 +459,7 @@ go run cmd/auction-service/main.go
 # ws://localhost:8080/ws?user_id=550e8400-e29b-41d4-a716-446655440001
 ```
 
-### Testing
 
-```bash
-# Run tests
-go test ./...
-
-# Run with coverage
-go test -cover ./...
-
-# Run specific test
-go test ./internal/app -v
-```
 
 ## API Reference
 
@@ -527,20 +487,8 @@ go test ./internal/app -v
   "auction_id": "uuid",
   "data": {
     "bid_id": "uuid",
-    "user_id": "uuid",
     "amount": 150.00
   },
   "timestamp": 1234567890
 }
 ```
-
-## Contributing
-
-1. Follow the hexagonal architecture principles
-2. Write tests for new features
-3. Update documentation for API changes
-4. Follow Go coding standards
-
-## License
-
-[License Information] 
