@@ -41,6 +41,76 @@ A real-time auction service built with Go, featuring WebSocket support, bidding 
 
 In a system like this, strong consistency is critical, especially when dealing with financial transactions such as bidding. To ensure data integrity and support ACID properties (Atomicity, Consistency, Isolation, Durability), a relational SQL database is the most suitable choice. It provides transactional guarantees, making it a reliable backbone for operations like bid creation, auction state transitions, and user balances.
 
+### 3. Scalability – Real-Time Auction Updates
+
+Since the auction service is expected to run in multiple instances and integrate with other services (e.g., Payments, Orders), we cannot rely on in-memory state for auction updates. Instead, we use Redis Pub/Sub to propagate real-time events.
+- Each auction will have its own Redis channel.
+- Interested consumers (e.g., WebSocket gateways or notification services) can subscribe to relevant channels.
+
+This ensures horizontal scalability and decouples message broadcasting from a single service instance.
+
+#### **Distributed Event Broadcasting**
+```mermaid
+graph TB
+    subgraph "Instance 1"
+        WS1[WebSocket Handler]
+        B1[Broadcaster]
+    end
+    
+    subgraph "Instance 2"
+        WS2[WebSocket Handler]
+        B2[Broadcaster]
+    end
+    
+    subgraph "Redis Cluster"
+        R1[Redis Node 1]
+        R2[Redis Node 2]
+    end
+    
+    subgraph "PostgreSQL"
+        DB[(Database)]
+    end
+    
+    WS1 --> B1
+    WS2 --> B2
+    B1 --> R1
+    B2 --> R2
+    R1 --> WS1
+    R2 --> WS2
+    B1 --> DB
+    B2 --> DB
+```
+## Data Flow
+
+### WebSocket Connection Flow
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant WsHandler
+    participant AuctionService
+    participant BidService
+    participant Broadcaster
+    participant Redis
+
+    Client->>WsHandler: Connect (user_id)
+    WsHandler->>WsHandler: Create Client & Event Channel
+    WsHandler->>Broadcaster: Subscribe to Auction Events
+    Broadcaster->>Redis: Subscribe to auction:channel
+    Redis-->>Broadcaster: Confirmation
+    Broadcaster-->>WsHandler: Subscription Confirmed
+    WsHandler-->>Client: Connection Established
+
+    Note over Client,Redis: Real-time Event Flow
+    loop Event Broadcasting
+        AuctionService->>Broadcaster: Publish Event
+        Broadcaster->>Redis: Publish to auction:channel
+        Redis->>Broadcaster: Event Received
+        Broadcaster->>WsHandler: Forward to Event Channel
+        WsHandler->>Client: Send WebSocket Message
+    end
+```
+
 ### 2. Bid Consistency – Handling Concurrent Updates
 
 To ensure consistency during bid creation, we will use Optimistic Concurrency Control (OCC).
@@ -51,13 +121,42 @@ This means:
 
 This avoids race conditions and ensures we don't overwrite a more recent bid.
 
-### 3. Scalability – Real-Time Auction Updates
 
-Since the auction service is expected to run in multiple instances and integrate with other services (e.g., Payments, Orders), we cannot rely on in-memory state for auction updates. Instead, we use Redis Pub/Sub to propagate real-time events.
-- Each auction will have its own Redis channel.
-- Interested consumers (e.g., WebSocket gateways or notification services) can subscribe to relevant channels.
+### Bid Placement Flow
 
-This ensures horizontal scalability and decouples message broadcasting from a single service instance.
+```mermaid
+sequenceDiagram
+    participant Client
+    participant WsHandler
+    participant BidService
+    participant AuctionRepo
+    participant BidRepo
+    participant Broadcaster
+    participant Redis
+
+    Client->>WsHandler: Place Bid Request
+    WsHandler->>BidService: PlaceBid()
+    
+    BidService->>AuctionRepo: Get Auction
+    AuctionRepo-->>BidService: Auction Data
+    
+    BidService->>BidRepo: Get Highest Bid
+    BidRepo-->>BidService: Current Highest Bid
+    
+    BidService->>BidRepo: PlaceBidWithOCC()
+    Note over BidRepo: Optimistic Concurrency Control
+    BidRepo->>BidRepo: Check Current Price
+    BidRepo->>BidRepo: Insert Bid & Update Auction
+    BidRepo-->>BidService: Success
+    
+    BidService->>Broadcaster: Publish Bid Event
+    Broadcaster->>Redis: Publish to auction:channel
+    Redis->>Broadcaster: Event Confirmed
+    Broadcaster-->>BidService: Success
+    
+    BidService-->>WsHandler: Bid Placed Successfully
+    WsHandler-->>Client: Success Response
+```
 
 ### 4. Handling Auction Expiry – Scheduling Auction End
 
@@ -68,6 +167,35 @@ Two approaches were considered:
   - Each auction is added to a sorted set with its end timestamp as the score.
   - A background process periodically polls for expired auctions using a time range query.
   - This avoids querying the database repeatedly and enables efficient expiry handling at scale.
+
+### Auction Expiration Flow
+
+```mermaid
+sequenceDiagram
+    participant Scheduler
+    participant Redis
+    participant AuctionService
+    participant Broadcaster
+    participant WsHandler
+    participant Client
+
+    Note over Scheduler: Every Second
+    Scheduler->>Redis: ZRANGEBYSCORE expired auctions
+    Redis-->>Scheduler: List of Expired Auctions
+    
+    loop For Each Expired Auction
+        Scheduler->>AuctionService: EndAuction()
+        AuctionService->>AuctionService: Update Status & Find Winner
+        AuctionService-->>Scheduler: Auction End Result
+        
+        Scheduler->>Broadcaster: Publish Auction Ended Event
+        Broadcaster->>Redis: Publish to auction:channel
+        Redis->>Broadcaster: Event Confirmed
+        
+        Broadcaster->>WsHandler: Forward Event
+        WsHandler->>Client: Send Auction Ended Message
+    end
+```
 
 ### 5. WebSocket Performance – Fast Message Handling
 
@@ -141,103 +269,6 @@ The system follows **Hexagonal Architecture** principles, providing clear separa
 └── scripts/              # Database scripts and utilities
 ```
 
-
-## Data Flow
-
-### WebSocket Connection Flow
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant WsHandler
-    participant AuctionService
-    participant BidService
-    participant Broadcaster
-    participant Redis
-
-    Client->>WsHandler: Connect (user_id)
-    WsHandler->>WsHandler: Create Client & Event Channel
-    WsHandler->>Broadcaster: Subscribe to Auction Events
-    Broadcaster->>Redis: Subscribe to auction:channel
-    Redis-->>Broadcaster: Confirmation
-    Broadcaster-->>WsHandler: Subscription Confirmed
-    WsHandler-->>Client: Connection Established
-
-    Note over Client,Redis: Real-time Event Flow
-    loop Event Broadcasting
-        AuctionService->>Broadcaster: Publish Event
-        Broadcaster->>Redis: Publish to auction:channel
-        Redis->>Broadcaster: Event Received
-        Broadcaster->>WsHandler: Forward to Event Channel
-        WsHandler->>Client: Send WebSocket Message
-    end
-```
-
-### Bid Placement Flow
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant WsHandler
-    participant BidService
-    participant AuctionRepo
-    participant BidRepo
-    participant Broadcaster
-    participant Redis
-
-    Client->>WsHandler: Place Bid Request
-    WsHandler->>BidService: PlaceBid()
-    
-    BidService->>AuctionRepo: Get Auction
-    AuctionRepo-->>BidService: Auction Data
-    
-    BidService->>BidRepo: Get Highest Bid
-    BidRepo-->>BidService: Current Highest Bid
-    
-    BidService->>BidRepo: PlaceBidWithOCC()
-    Note over BidRepo: Optimistic Concurrency Control
-    BidRepo->>BidRepo: Check Current Price
-    BidRepo->>BidRepo: Insert Bid & Update Auction
-    BidRepo-->>BidService: Success
-    
-    BidService->>Broadcaster: Publish Bid Event
-    Broadcaster->>Redis: Publish to auction:channel
-    Redis->>Broadcaster: Event Confirmed
-    Broadcaster-->>BidService: Success
-    
-    BidService-->>WsHandler: Bid Placed Successfully
-    WsHandler-->>Client: Success Response
-```
-
-### Auction Expiration Flow
-
-```mermaid
-sequenceDiagram
-    participant Scheduler
-    participant Redis
-    participant AuctionService
-    participant Broadcaster
-    participant WsHandler
-    participant Client
-
-    Note over Scheduler: Every Second
-    Scheduler->>Redis: ZRANGEBYSCORE expired auctions
-    Redis-->>Scheduler: List of Expired Auctions
-    
-    loop For Each Expired Auction
-        Scheduler->>AuctionService: EndAuction()
-        AuctionService->>AuctionService: Update Status & Find Winner
-        AuctionService-->>Scheduler: Auction End Result
-        
-        Scheduler->>Broadcaster: Publish Auction Ended Event
-        Broadcaster->>Redis: Publish to auction:channel
-        Redis->>Broadcaster: Event Confirmed
-        
-        Broadcaster->>WsHandler: Forward Event
-        WsHandler->>Client: Send Auction Ended Message
-    end
-```
-
 ## Database Design
 
 ### Schema Overview
@@ -302,42 +333,6 @@ CREATE INDEX idx_bids_user_created ON bids(user_id, created_at DESC);
 
 The system is designed for horizontal scaling with multiple service instances:
 
-#### **Stateless Design**
-- No in-memory state shared between instances
-- All state stored in PostgreSQL and Redis
-- Any instance can handle any request
-
-#### **Distributed Event Broadcasting**
-```mermaid
-graph TB
-    subgraph "Instance 1"
-        WS1[WebSocket Handler]
-        B1[Broadcaster]
-    end
-    
-    subgraph "Instance 2"
-        WS2[WebSocket Handler]
-        B2[Broadcaster]
-    end
-    
-    subgraph "Redis Cluster"
-        R1[Redis Node 1]
-        R2[Redis Node 2]
-    end
-    
-    subgraph "PostgreSQL"
-        DB[(Database)]
-    end
-    
-    WS1 --> B1
-    WS2 --> B2
-    B1 --> R1
-    B2 --> R2
-    R1 --> WS1
-    R2 --> WS2
-    B1 --> DB
-    B2 --> DB
-```
 
 #### **Load Balancing**
 - WebSocket connections can be load balanced using sticky sessions
