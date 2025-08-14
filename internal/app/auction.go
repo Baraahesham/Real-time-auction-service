@@ -91,18 +91,8 @@ func (service *AuctionService) CreateAuction(ctx context.Context, req inbound.Cr
 		return nil, shared.ErrInvalidTimeFormat
 	}
 
-	service.logger.Debug().
-		Time("parsed_start_time", startTime).
-		Time("parsed_end_time", endTime).
-		Msg("Time parsing completed")
-
 	// Validate time constraints
 	now := time.Now()
-	service.logger.Debug().
-		Time("current_time", now).
-		Time("start_time", startTime).
-		Time("end_time", endTime).
-		Msg("Validating time constraints")
 
 	if startTime.Before(now) {
 		service.logger.Warn().

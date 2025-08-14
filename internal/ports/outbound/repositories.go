@@ -47,6 +47,9 @@ type BidRepository interface {
 
 	// Update updates a bid
 	Update(ctx context.Context, bid *bid.Bid) error
+
+	// PlaceBidWithOCC places a bid using optimistic concurrency control
+	PlaceBidWithOCC(ctx context.Context, bid *bid.Bid, expectedCurrentPrice float64) error
 }
 
 // ItemRepository defines the interface for item data operations

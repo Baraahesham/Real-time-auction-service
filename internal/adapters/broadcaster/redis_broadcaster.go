@@ -47,13 +47,13 @@ func NewBroadcaster(params RedisBroadcasterParams) *RedisBroadcaster {
 }
 
 // Subscribe subscribes a client to events for a specific auction
-func (r *RedisBroadcaster) Subscribe(ctx context.Context, auctionID uuid.UUID, clientID string, eventChan chan outbound.Event) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+func (redisClient *RedisBroadcaster) Subscribe(ctx context.Context, auctionID uuid.UUID, clientID string, eventChan chan outbound.Event) error {
+	redisClient.mu.Lock()
+	defer redisClient.mu.Unlock()
 
 	// Check if client is already subscribed to this auction
-	if r.clientsToAuction[clientID] != nil && r.clientsToAuction[clientID][auctionID.String()] {
-		r.logger.Info().
+	if redisClient.clientsToAuction[clientID] != nil && redisClient.clientsToAuction[clientID][auctionID.String()] {
+		redisClient.logger.Info().
 			Str("client_id", clientID).
 			Str("auction_id", auctionID.String()).
 			Msg("Client already subscribed to auction")
@@ -61,37 +61,37 @@ func (r *RedisBroadcaster) Subscribe(ctx context.Context, auctionID uuid.UUID, c
 	}
 
 	// Store the event channel if this is the first subscription
-	if r.subscribers[clientID] == nil {
-		r.subscribers[clientID] = eventChan
+	if redisClient.subscribers[clientID] == nil {
+		redisClient.subscribers[clientID] = eventChan
 	}
 
-	if r.clientsToAuction[clientID] == nil {
-		r.clientsToAuction[clientID] = make(map[string]bool)
+	if redisClient.clientsToAuction[clientID] == nil {
+		redisClient.clientsToAuction[clientID] = make(map[string]bool)
 	}
-	r.clientsToAuction[clientID][auctionID.String()] = true
+	redisClient.clientsToAuction[clientID][auctionID.String()] = true
 
 	// Get or create pubsub connection for this client
 	var pubsub *redis.PubSub
-	if existingPubsub, exists := r.pubsubs[clientID]; exists {
+	if existingPubsub, exists := redisClient.pubsubs[clientID]; exists {
 		// Client already has a pubsub connection, subscribe to additional channel
 		pubsub = existingPubsub
 	} else {
 		// Create new pubsub connection for this client
-		pubsub = r.client.Subscribe(ctx)
-		r.pubsubs[clientID] = pubsub
+		pubsub = redisClient.client.Subscribe(ctx)
+		redisClient.pubsubs[clientID] = pubsub
 
 		// Start goroutine to listen for Redis messages and forward to local channel
-		go r.listenForRedisMessages(pubsub, clientID, eventChan)
+		go redisClient.listenForRedisMessages(pubsub, clientID, eventChan)
 	}
 
 	// Subscribe to the specific auction channel
 	channelName := fmt.Sprintf("auction:%s", auctionID.String())
 	if err := pubsub.Subscribe(ctx, channelName); err != nil {
-		r.logger.Error().Err(err).Str("client_id", clientID).Str("auction_id", auctionID.String()).Msg("Failed to subscribe to Redis channel")
+		redisClient.logger.Error().Err(err).Str("client_id", clientID).Str("auction_id", auctionID.String()).Msg("Failed to subscribe to Redis channel")
 		return err
 	}
 
-	r.logger.Info().
+	redisClient.logger.Info().
 		Str("client_id", clientID).
 		Str("auction_id", auctionID.String()).
 		Msg("Client subscribed to auction via Redis")
@@ -99,43 +99,42 @@ func (r *RedisBroadcaster) Subscribe(ctx context.Context, auctionID uuid.UUID, c
 }
 
 // Unsubscribe unsubscribes a client from events for a specific auction
-func (r *RedisBroadcaster) Unsubscribe(ctx context.Context, auctionID uuid.UUID, clientID string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+func (redisClient *RedisBroadcaster) Unsubscribe(ctx context.Context, auctionID uuid.UUID, clientID string) error {
+	redisClient.mu.Lock()
+	defer redisClient.mu.Unlock()
 
-	// Remove auction tracking
-	if clientAuctions, exists := r.clientsToAuction[clientID]; exists {
+	if clientAuctions, exists := redisClient.clientsToAuction[clientID]; exists {
 		delete(clientAuctions, auctionID.String())
 
 		// If no more auctions, clean up the client entry
 		if len(clientAuctions) == 0 {
-			delete(r.clientsToAuction, clientID)
+			delete(redisClient.clientsToAuction, clientID)
 
 			// Close and remove local channel
-			if eventChan, exists := r.subscribers[clientID]; exists {
+			if eventChan, exists := redisClient.subscribers[clientID]; exists {
 				close(eventChan)
-				delete(r.subscribers, clientID)
+				delete(redisClient.subscribers, clientID)
 			}
 
 			// Close Redis pubsub connection
-			if pubsub, exists := r.pubsubs[clientID]; exists {
+			if pubsub, exists := redisClient.pubsubs[clientID]; exists {
 				if err := pubsub.Close(); err != nil {
-					r.logger.Error().Err(err).Str("client_id", clientID).Msg("Error closing Redis pubsub for client")
+					redisClient.logger.Error().Err(err).Str("client_id", clientID).Msg("Error closing Redis pubsub for client")
 				}
-				delete(r.pubsubs, clientID)
+				delete(redisClient.pubsubs, clientID)
 			}
 		} else {
 			// Unsubscribe from the specific auction channel
-			if pubsub, exists := r.pubsubs[clientID]; exists {
+			if pubsub, exists := redisClient.pubsubs[clientID]; exists {
 				channelName := fmt.Sprintf("auction:%s", auctionID.String())
 				if err := pubsub.Unsubscribe(ctx, channelName); err != nil {
-					r.logger.Error().Err(err).Str("client_id", clientID).Str("auction_id", auctionID.String()).Msg("Error unsubscribing from Redis channel")
+					redisClient.logger.Error().Err(err).Str("client_id", clientID).Str("auction_id", auctionID.String()).Msg("Error unsubscribing from Redis channel")
 				}
 			}
 		}
 	}
 
-	r.logger.Info().
+	redisClient.logger.Info().
 		Str("client_id", clientID).
 		Str("auction_id", auctionID.String()).
 		Msg("Client unsubscribed from auction")
@@ -143,9 +142,9 @@ func (r *RedisBroadcaster) Unsubscribe(ctx context.Context, auctionID uuid.UUID,
 }
 
 // Publish publishes an event to all subscribers of an auction via Redis
-func (r *RedisBroadcaster) Publish(ctx context.Context, auctionID uuid.UUID, event outbound.Event) error {
+func (redisClient *RedisBroadcaster) Publish(ctx context.Context, auctionID uuid.UUID, event outbound.Event) error {
 	channelName := fmt.Sprintf("auction:%s", auctionID.String())
-	r.logger.Info().Str("channel_name", channelName).Msg("Publishing event to Redis")
+	redisClient.logger.Info().Str("channel_name", channelName).Msg("Publishing event to Redis")
 
 	if event.Timestamp == 0 {
 		event.Timestamp = time.Now().Unix()
@@ -153,19 +152,19 @@ func (r *RedisBroadcaster) Publish(ctx context.Context, auctionID uuid.UUID, eve
 
 	eventJSON, err := json.Marshal(event)
 	if err != nil {
-		r.logger.Error().Err(err).Msg("Failed to marshal event")
+		redisClient.logger.Error().Err(err).Msg("Failed to marshal event")
 		return fmt.Errorf("failed to marshal event: %w", err)
 	}
 
 	// Publish to Redis
-	result := r.client.Publish(ctx, channelName, eventJSON)
+	result := redisClient.client.Publish(ctx, channelName, eventJSON)
 	if err := result.Err(); err != nil {
-		r.logger.Error().Err(err).Msg("Failed to publish to Redis")
+		redisClient.logger.Error().Err(err).Msg("Failed to publish to Redis")
 		return fmt.Errorf("failed to publish to Redis: %w", err)
 	}
 
 	subscriberCount := result.Val()
-	r.logger.Info().
+	redisClient.logger.Info().
 		Str("event_type", string(event.Type)).
 		Str("auction_id", auctionID.String()).
 		Int64("subscriber_count", subscriberCount).
@@ -174,23 +173,23 @@ func (r *RedisBroadcaster) Publish(ctx context.Context, auctionID uuid.UUID, eve
 	return nil
 }
 
-func (r *RedisBroadcaster) GetSubscribers(ctx context.Context, auctionID uuid.UUID) ([]string, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+func (redisClient *RedisBroadcaster) GetSubscribers(ctx context.Context, auctionID uuid.UUID) ([]string, error) {
+	redisClient.mu.RLock()
+	defer redisClient.mu.RUnlock()
 
 	var subscribers []string
-	for clientID := range r.subscribers {
+	for clientID := range redisClient.subscribers {
 		subscribers = append(subscribers, clientID)
 	}
 
 	return subscribers, nil
 }
 
-func (r *RedisBroadcaster) GetEventChannel(clientID string) <-chan outbound.Event {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+func (redisClient *RedisBroadcaster) GetEventChannel(clientID string) <-chan outbound.Event {
+	redisClient.mu.RLock()
+	defer redisClient.mu.RUnlock()
 
-	if eventChan, exists := r.subscribers[clientID]; exists {
+	if eventChan, exists := redisClient.subscribers[clientID]; exists {
 		return eventChan
 	}
 
@@ -198,10 +197,10 @@ func (r *RedisBroadcaster) GetEventChannel(clientID string) <-chan outbound.Even
 }
 
 // listenForRedisMessages listens for Redis messages and forwards them to the local channel
-func (r *RedisBroadcaster) listenForRedisMessages(pubsub *redis.PubSub, clientID string, localChan chan outbound.Event) {
+func (redisClient *RedisBroadcaster) listenForRedisMessages(pubsub *redis.PubSub, clientID string, localChan chan outbound.Event) {
 	defer func() {
 		if err := recover(); err != nil {
-			r.logger.Error().Interface("panic", err).Str("client_id", clientID).Msg("Redis message listener panic for client")
+			redisClient.logger.Error().Interface("panic", err).Str("client_id", clientID).Msg("Redis message listener panic for client")
 		}
 	}()
 
@@ -211,56 +210,56 @@ func (r *RedisBroadcaster) listenForRedisMessages(pubsub *redis.PubSub, clientID
 		select {
 		case msg, ok := <-ch:
 			if !ok {
-				r.logger.Info().Str("client_id", clientID).Msg("Redis channel closed for client")
+				redisClient.logger.Info().Str("client_id", clientID).Msg("Redis channel closed for client")
 				return
 			}
 
 			var event outbound.Event
 			if err := json.Unmarshal([]byte(msg.Payload), &event); err != nil {
-				r.logger.Error().Err(err).Str("client_id", clientID).Msg("Failed to unmarshal Redis message for client")
+				redisClient.logger.Error().Err(err).Str("client_id", clientID).Msg("Failed to unmarshal Redis message for client")
 				continue
 			}
 
 			select {
 			case localChan <- event:
 			default:
-				r.logger.Warn().Str("client_id", clientID).Msg("Local channel full for client, dropping event")
+				redisClient.logger.Warn().Str("client_id", clientID).Msg("Local channel full for client, dropping event")
 			}
 
-		case <-r.ctx.Done():
-			r.logger.Info().Str("client_id", clientID).Msg("Redis broadcaster context cancelled for client")
+		case <-redisClient.ctx.Done():
+			redisClient.logger.Info().Str("client_id", clientID).Msg("Redis broadcaster context cancelled for client")
 			return
 		}
 	}
 }
 
-func (r *RedisBroadcaster) Close() error {
-	r.cancel()
+func (redisClient *RedisBroadcaster) Close() error {
+	redisClient.cancel()
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	redisClient.mu.Lock()
+	defer redisClient.mu.Unlock()
 
-	for clientID, eventChan := range r.subscribers {
+	for clientID, eventChan := range redisClient.subscribers {
 		close(eventChan)
-		delete(r.subscribers, clientID)
+		delete(redisClient.subscribers, clientID)
 	}
 
 	// Close all pubsub connections
-	for clientID, pubsub := range r.pubsubs {
+	for clientID, pubsub := range redisClient.pubsubs {
 		if err := pubsub.Close(); err != nil {
-			r.logger.Error().Err(err).Str("client_id", clientID).Msg("Error closing Redis pubsub for client")
+			redisClient.logger.Error().Err(err).Str("client_id", clientID).Msg("Error closing Redis pubsub for client")
 		}
-		delete(r.pubsubs, clientID)
+		delete(redisClient.pubsubs, clientID)
 	}
 
-	return r.client.Close()
+	return redisClient.client.Close()
 }
 
-func (r *RedisBroadcaster) IsSubscribed(ctx context.Context, auctionID uuid.UUID, clientID string) bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+func (redisClient *RedisBroadcaster) IsSubscribed(ctx context.Context, auctionID uuid.UUID, clientID string) bool {
+	redisClient.mu.RLock()
+	defer redisClient.mu.RUnlock()
 
-	clientAuctions, exists := r.clientsToAuction[clientID]
+	clientAuctions, exists := redisClient.clientsToAuction[clientID]
 	if !exists {
 		return false
 	}

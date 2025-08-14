@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"troffee-auction-service/internal/adapters/db"
 	"troffee-auction-service/internal/domain/bid"
 	"troffee-auction-service/internal/domain/shared"
 	"troffee-auction-service/internal/ports/inbound"
@@ -69,10 +68,6 @@ func (client *BidService) PlaceBid(ctx context.Context, req inbound.PlaceBidRequ
 		client.logger.Error().Err(err).Str("auction_id", req.AuctionID.String()).Msg("Auction not found")
 		return nil, shared.ErrAuctionNotFound
 	}
-
-	client.logger.Info().Interface("req", req).
-		Msg("Auction details for bid validation")
-
 	if !auction.CanBid() {
 		client.logger.Warn().Str("auction_id", req.AuctionID.String()).Msg("Auction not accepting bids")
 		return nil, shared.ErrAuctionNotAcceptingBids
@@ -198,29 +193,8 @@ func (s *BidService) placeBidWithOCC(ctx context.Context, newBid *bid.Bid, curre
 		Float64("current_price", currentPrice).
 		Msg("Attempting to place bid with OCC")
 
-	// Cast the repository to access the OCC method
-	bidRepo, ok := s.bidRepo.(*db.BidRepository)
-	if !ok {
-		s.logger.Warn().Msg("Repository doesn't support OCC, using fallback approach")
-		// Fallback to simple approach if repository doesn't support OCC
-		if err := s.bidRepo.Create(ctx, newBid); err != nil {
-			s.logger.Error().Err(err).Str("bid_id", newBid.ID.String()).Msg("Failed to create bid in fallback mode")
-			return err
-		}
-
-		// Mark bid as accepted
-		newBid.Accept()
-		if err := s.bidRepo.Update(ctx, newBid); err != nil {
-			s.logger.Error().Err(err).Str("bid_id", newBid.ID.String()).Msg("Failed to update bid status in fallback mode")
-			return err
-		}
-		s.logger.Info().Str("bid_id", newBid.ID.String()).Msg("Bid placed successfully using fallback approach")
-		return nil
-	}
-
-	// Use the repository's OCC method
-	s.logger.Debug().Str("bid_id", newBid.ID.String()).Msg("Using OCC method for bid placement")
-	if err := bidRepo.PlaceBidWithOCC(ctx, newBid, currentPrice); err != nil {
+	// Use the repository's OCC method directly through the interface
+	if err := s.bidRepo.PlaceBidWithOCC(ctx, newBid, currentPrice); err != nil {
 		s.logger.Error().Err(err).Str("bid_id", newBid.ID.String()).Msg("Failed to place bid with OCC")
 		return err
 	}
